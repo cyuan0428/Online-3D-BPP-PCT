@@ -1,12 +1,16 @@
 from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import List
 import torch
 from model import DRL_GAT
 from tools import load_policy
 
 app = FastAPI()
 
+# 自動偵測運算裝置
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+# ==== 模型初始化參數 ====
 class Args:
     setting = 2
     lnes = 'EMS'
@@ -47,15 +51,55 @@ class Args:
     internal_node_length = 6
     normFactor = 1.0 / max(container_size)
 
+# ==== 輸入格式 ====
+class Item(BaseModel):
+    color: str
+    size: List[float]  # [長, 寬, 高]
+
+class PredictRequest(BaseModel):
+    items: List[Item]
+
+# ==== 啟動時載入模型（含try/except印traceback） ====
 @app.on_event("startup")
 def load_model():
     global model
-    args = Args()
-    model = DRL_GAT(args)
-    model = load_policy("PCT-cont_test1-2025.07.26-16-47-19_2025.07.27-06-39-42.pt", model)
-    model.to(device)
-    model.eval()
+    try:
+        args = Args()
+        model = DRL_GAT(args)
+        model = load_policy("PCT-cont_test1-2025.07.26-16-47-19_2025.07.27-06-39-42.pt", model)
+        model.to(device)
+        model.eval()
+        print(f"模型載入完成，設備：{device}")
+    except Exception as e:
+        import traceback
+        print("=== 載入模型發生錯誤 ===")
+        traceback.print_exc()
+        raise e
 
+# ==== API 端點 ====
 @app.post("/predict")
-def predict():
-    return {"message": f"模型已經載入到 {device}，可以推論！"}
+def predict(req: PredictRequest):
+    try:
+        # 轉成模型可接受的 tensor 格式
+        input_sizes = [item.size for item in req.items]
+        input_tensor = torch.tensor([input_sizes], dtype=torch.float32).to(device)
+
+        # 模型推論
+        with torch.no_grad():
+            output = model(input_tensor)
+
+        # 處理輸出結果 (根據你的模型調整)
+        output_result = [x.cpu().numpy().tolist() for x in output]
+
+        return {
+            "received": [item.dict() for item in req.items],
+            "model_output": output_result,
+            "message": f"推論成功，模型運行於 {device}！"
+        }
+    except Exception as e:
+        import traceback
+        print("=== 推論過程發生錯誤 ===")
+        traceback.print_exc()
+        return {
+            "error": f"推論失敗: {str(e)}"
+        }
